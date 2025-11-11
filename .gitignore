@@ -1,0 +1,10 @@
+/.clang-format
+/.idea
+/.vscode
+/build
+/images
+/videos
+/vout_frames
+/src/ffmpeg
+/src/stb
+/src/Video_Codec_SDK_13.0.19

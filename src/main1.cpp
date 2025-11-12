@@ -100,14 +100,17 @@ int writeCodecAVPackets(std::string path) {
         std::cerr << "NVENC init failed\n";
         return 8;
     }
+    encoder.reconfigureBitrate(8'000'000, 12'000'000, fps);
 
     MkvMuxer muxer;
+    // MP4Muxer mp4;
     if (!muxer.open("C:/Users/user/Desktop/VideoFiltering/videos/out.mkv", w, h, fps)) {
         std::cerr << "Muxer open failed\n";
         return 9;
     }
-
+    // mp4.open("C:/Users/user/Desktop/VideoFiltering/videos/out.mp4", w, h, fps);
     NVDecoder nvdec(ctx, vs->codecpar->width, vs->codecpar->height);
+    // nvdec.attachMP4(&mp4);
     nvdec.attachEncoderMux(&encoder, &muxer);
 
     nvdec.setFrameCallback([&](const std::vector<uint8_t> &rgb, int w, int h, int64_t pts) {
@@ -169,6 +172,7 @@ int writeCodecAVPackets(std::string path) {
     avformat_close_input(&ifmt);
     cuDevicePrimaryCtxRelease(dev);
     muxer.close();
+    // mp4.close();
     encoder.destroy();
     return 0;
 }
@@ -179,7 +183,7 @@ int main() {
     std::cout << "output dir: " << filepath << std::endl;
     createDirectoryIfNotExists(filepath);
 
-    int rc = writeCodecAVPackets("C:/Users/user/Desktop/VideoFiltering/videos/Lunyashka.mp4");
+    int rc = writeCodecAVPackets("C:/Users/user/Desktop/VideoFiltering/videos/wa.mp4");
 
     return EXIT_SUCCESS;
 }

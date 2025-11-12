@@ -6,11 +6,7 @@
 #include <algorithm>
 #include <cmath>
 
-void negativeFilter(int width, int height, int channels, unsigned char *&img);
 unsigned char *grayFilter(int width, int height, int channels, const unsigned char *img);
-void upscaleImage(int width, int height, int channels, const unsigned char *img, int scale);
-unsigned char *prewittFilter(int width, int height, const unsigned char *gray);
-unsigned char *bilateralFilter(const unsigned char *img, int width, int height, int channels, int radius, float sigmaSpace, float sigmaColor);
 
 unsigned char *rndPr(int width, int height, int channels, unsigned char *img);
 

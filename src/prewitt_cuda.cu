@@ -109,7 +109,6 @@ __global__ void mergeChannelsKernel(
     }
 }
 
-
 extern "C" void prewittColorCUDA(unsigned char *img, std::vector<uint8_t> result, int width, int height) {
     if (!img || !result.data()) return;
 

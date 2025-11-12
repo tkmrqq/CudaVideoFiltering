@@ -30,24 +30,32 @@ static void build_h264_extradata_annexb(const uint8_t *data, int size, std::vect
     std::vector<std::pair<int, int>> nal_ranges;
     find_start_codes(data, size, nal_ranges);
     extradata.clear();
-    auto append_start = [&](int len) {
-        static const uint8_t sc3[3] = {0, 0, 1};
-        static const uint8_t sc4[4] = {0, 0, 0, 1};
-        if (len == 3) extradata.insert(extradata.end(), sc3, sc3 + 3);
-        else
-            extradata.insert(extradata.end(), sc4, sc4 + 4);
-    };
-    // Собираем только SPS/PPS, оставляя Annex-B префиксы
+
+    int sps_s = -1, sps_e = -1, pps_s = -1, pps_e = -1;
     for (auto [s, e]: nal_ranges) {
         if (s >= e) continue;
-        uint8_t nal_hdr = data[s];
-        int nal_type = nal_hdr & 0x1F;// H.264
-        if (nal_type == 7 || nal_type == 8) {
-            append_start(4);
-            extradata.insert(extradata.end(), data + s, data + e);
-        }
+        int nal_type = data[s] & 0x1F;
+        if (nal_type == 7) {
+            sps_s = s;
+            sps_e = e;
+        }// запоминаем последний SPS
+        else if (nal_type == 8) {
+            pps_s = s;
+            pps_e = e;
+        }// последний PPS
+    }
+    if (sps_s >= 0 && sps_e > sps_s) {
+        static const uint8_t sc4[4] = {0, 0, 0, 1};
+        extradata.insert(extradata.end(), sc4, sc4 + 4);
+        extradata.insert(extradata.end(), data + sps_s, data + sps_e);
+    }
+    if (pps_s >= 0 && pps_e > pps_s) {
+        static const uint8_t sc4[4] = {0, 0, 0, 1};
+        extradata.insert(extradata.end(), sc4, sc4 + 4);
+        extradata.insert(extradata.end(), data + pps_s, data + pps_e);
     }
 }
+
 
 bool MkvMuxer::open(const char *path, int w, int h, int fps) {
     avformat_alloc_output_context2(&oc, nullptr, nullptr, path);
@@ -76,14 +84,51 @@ bool MkvMuxer::open(const char *path, int w, int h, int fps) {
 
 bool MkvMuxer::write(const uint8_t *data, int size, bool key, int64_t frameIndex) {
     if (!header_written && key) {
-        // собрать extradata из SPS/PPS текущего IDR
         std::vector<uint8_t> ed;
-        build_h264_extradata_annexb(data, size, ed);// см. выше
-        if (!ed.empty()) {
-            st->codecpar->extradata = (uint8_t *) av_mallocz(ed.size() + AV_INPUT_BUFFER_PADDING_SIZE);
-            st->codecpar->extradata_size = (int) ed.size();
-            memcpy(st->codecpar->extradata, ed.data(), ed.size());
+        build_h264_extradata_annexb(data, size, ed);
+        if (ed.empty()) {
+            // ключевой пакет без SPS/PPS — ждём следующий ключ
+            return true;
         }
+        st->codecpar->extradata = (uint8_t *) av_mallocz(ed.size() + AV_INPUT_BUFFER_PADDING_SIZE);
+        st->codecpar->extradata_size = (int) ed.size();
+        memcpy(st->codecpar->extradata, ed.data(), ed.size());
+
+        auto dump_nal_types = [](const uint8_t *d, int sz) {
+            int i = 0;
+            auto is_sc = [&](int k) { return k + 3 < sz && d[k] == 0 && d[k + 1] == 0 && ((d[k + 2] == 1) || (d[k + 2] == 0 && k + 4 < sz && d[k + 3] == 1)); };
+            int start = -1;
+            std::vector<int> types;
+            while (i < sz) {
+                if (is_sc(i)) {
+                    if (start >= 0) {}
+                    if (d[i + 2] == 1) {
+                        start = i + 3;
+                        i += 3;
+                    } else {
+                        start = i + 4;
+                        i += 4;
+                    }
+                } else {
+                    ++i;
+                }
+                if (start >= 0 && (i >= sz || is_sc(i))) {
+                    int t = d[start] & 0x1F;
+                    types.push_back(t);
+                }
+            }
+#ifdef _DEBUG
+            std::cout << "[MUX] extradata NAL types:";
+            for (int t: types) std::cout << " " << t;
+            std::cout << "\n";
+#endif
+        };
+#ifdef _DEBUG
+        std::cout << "[MUX] keyframe before header: ed_size=" << (int) ed.size() << "\n";
+#endif
+        dump_nal_types(ed.data(), (int) ed.size());
+
+
         int rh = avformat_write_header(oc, nullptr);
         if (rh < 0) {
             char err[128];
@@ -94,9 +139,15 @@ bool MkvMuxer::write(const uint8_t *data, int size, bool key, int64_t frameIndex
         header_written = true;
     }
     if (!header_written) {
-        // ещё не было ключа с SPS/PPS — отложим до первого keyframe
+        // Ещё ждем «полезный» IDR с SPS/PPS
         return true;
     }
+#ifdef _DEBUG
+    std::cout << "[MUX] write pkt pts=" << (long long) frameIndex
+              << " key=" << (key ? 1 : 0)
+              << " sz=" << size << "\n";
+#endif
+
     AVPacket pkt;
     av_init_packet(&pkt);
     pkt.data = const_cast<uint8_t *>(data);
@@ -107,6 +158,7 @@ bool MkvMuxer::write(const uint8_t *data, int size, bool key, int64_t frameIndex
     pkt.duration = 1;
     if (key) pkt.flags |= AV_PKT_FLAG_KEY;
     av_packet_rescale_ts(&pkt, tb, st->time_base);
+
     int r = av_interleaved_write_frame(oc, &pkt);
     if (r < 0) {
         char err[128];
@@ -116,6 +168,7 @@ bool MkvMuxer::write(const uint8_t *data, int size, bool key, int64_t frameIndex
     }
     return true;
 }
+
 
 void MkvMuxer::close() {
     if (oc) {

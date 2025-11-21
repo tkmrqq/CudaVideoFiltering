@@ -3,6 +3,8 @@ project(VideoFiltering LANGUAGES CXX CUDA)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_FLAGS_RELEASE "-O2")
+set (CUDA_LAUNCH_BLOCKING=1)
+set (CUDA_DEBUG_SYNC=1)
 
 # ---- Пути ----
 set(FFMPEG_ROOT "${CMAKE_SOURCE_DIR}/src/ffmpeg")

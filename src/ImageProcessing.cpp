@@ -59,21 +59,21 @@ bool saveImage(const std::string &fullPath, int width, int height, int channels,
     namespace fs = std::filesystem;
     try {
         fs::path p(fullPath);
-        if (p.has_parent_path()) fs::create_directories(p.parent_path());// создаём каталоги рекурсивно [web:254]
+        if (p.has_parent_path()) fs::create_directories(p.parent_path());
         std::string ext = p.extension().string();
-        for (auto &c: ext) c = (char) std::tolower((unsigned char) c);// нормализуем расширение [web:254]
+        for (auto &c: ext) c = (char) std::tolower((unsigned char) c);
 
         if (ext == ".jpg" || ext == ".jpeg") {
-            int quality = 90;                                                                   // 1..100, типичный диапазон качества для JPG [web:202]
-            int ok = stbi_write_jpg(p.string().c_str(), width, height, channels, data, quality);// запись JPG [web:218]
-            return ok != 0;                                                                     // 1 — успех, 0 — ошибка [web:218]
-        } else {                                                                                // PNG по умолчанию
-            int stride = width * channels;                                                      // stride — байт на строку, обязателен для PNG [web:235][web:202]
-            int ok = stbi_write_png(p.string().c_str(), width, height, channels, data, stride); // запись PNG [web:218]
-            return ok != 0;                                                                     // 1 — успех, 0 — ошибка [web:218]
+            int quality = 90;
+            int ok = stbi_write_jpg(p.string().c_str(), width, height, channels, data, quality);
+            return ok != 0;
+        } else {
+            int stride = width * channels;
+            int ok = stbi_write_png(p.string().c_str(), width, height, channels, data, stride);
+            return ok != 0;
         }
     } catch (const std::exception &e) {
         // можно залогировать e.what()
-        return false;// исключение при работе с ФС или путями [web:254]
+        return false;
     }
 }

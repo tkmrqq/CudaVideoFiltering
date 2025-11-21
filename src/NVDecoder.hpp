@@ -1,5 +1,4 @@
 #pragma once
-// #include "MP4Muxer.hpp"
 #include "MkvMuxer.hpp"
 #include "NVEncoder.hpp"
 #include "cuda_iface.hpp"
@@ -19,67 +18,77 @@ public:
         : cuCtx(ctx), cuParser(nullptr), cuDecoder(nullptr), width(width), height(height) {}
 
     ~NVDecoder() {
-        if (cuParser) cuvidDestroyVideoParser(cuParser);
-        if (cuDecoder) cuvidDestroyDecoder(cuDecoder);
+        if (cuParser)
+            cuvidDestroyVideoParser(cuParser);
+        if (cuDecoder)
+            cuvidDestroyDecoder(cuDecoder);
     }
 
     void setFrameCallback(std::function<void(const std::vector<uint8_t> &, int, int, int)> cb) {
         frameCallback = std::move(cb);
     }
 
-    // Инициализация парсера, колбэки static!
     bool init(cudaVideoCodec codec) {
         CUVIDPARSERPARAMS parserParams = {};
-        parserParams.CodecType = cudaVideoCodec_H264;
+        parserParams.CodecType = codec;// Используем переданный кодек
         parserParams.ulMaxNumDecodeSurfaces = 8;
         parserParams.ulMaxDisplayDelay = 0;
         parserParams.pUserData = this;
         parserParams.pfnSequenceCallback = &NVDecoder::HandleVideoSequence;
         parserParams.pfnDecodePicture = &NVDecoder::HandlePictureDecode;
         parserParams.pfnDisplayPicture = &NVDecoder::HandlePictureDisplay;
-        return cuvidCreateVideoParser(&cuParser, &parserParams) == CUDA_SUCCESS;
+
+        CUresult result = cuvidCreateVideoParser(&cuParser, &parserParams);
+        if (result != CUDA_SUCCESS) {
+            std::cerr << "Failed to create video parser: " << result << std::endl;
+            return false;
+        }
+        return true;
     }
 
-    // main loop: передаете пакет после init
     void decodePacket(const AVPacket *pkt) {
+        if (!cuParser) {
+            std::cerr << "Video parser not initialized!" << std::endl;
+            return;
+        }
+
         CUVIDSOURCEDATAPACKET pkt_in = {};
         pkt_in.payload = pkt ? pkt->data : nullptr;
         pkt_in.payload_size = pkt ? pkt->size : 0;
         pkt_in.flags = (pkt_in.payload && pkt_in.payload_size) ? 0 : CUVID_PKT_ENDOFSTREAM;
-        cuvidParseVideoData(cuParser, &pkt_in);
+        pkt_in.timestamp = pkt ? pkt->pts : 0;// Важно сохранять временные метки
+
+        CUresult result = cuvidParseVideoData(cuParser, &pkt_in);
+        if (result != CUDA_SUCCESS) {
+            std::cerr << "Failed to parse video data: " << result << std::endl;
+        }
     }
 
-    //* Внешние полезные данные
-    int width, height;// сохраняем для работы ядра
+    int width, height;
     void attachEncoderMux(NVENCEncoder *enc, MkvMuxer *mux) {
         this->encoder = enc;
         this->muxer = mux;
     }
 
-    // void attachMP4(MP4Muxer *mp4m) { this->mp4 = mp4m; }
-
 private:
-    //frame helpers
     CUdeviceptr last_nv12_dup = 0;
     uint32_t last_nv12_pitch = 0;
     bool have_dup = false;
-    int64_t frameIndex = 0;// общий счётчик кадров для muxer
-    int dupCount = 0;
+    int64_t frameIndex = 0;
 
-    //NVENC CLASSES
     NVENCEncoder *encoder = nullptr;
     MkvMuxer *muxer = nullptr;
-    // MP4Muxer *mp4 = nullptr;
 
     CUcontext cuCtx;
     CUvideoparser cuParser;
     CUvideodecoder cuDecoder;
     std::function<void(const std::vector<uint8_t> &, int, int, int)> frameCallback;
 
-    // Sequence-callback: создать декодер под параметры потока
     static int CUDAAPI HandleVideoSequence(void *userData, CUVIDEOFORMAT *format) {
         NVDecoder *self = reinterpret_cast<NVDecoder *>(userData);
-        CUcontext old = nullptr;
+
+        // Сохраняем и восстанавливаем контекст
+        CUcontext oldCtx = nullptr;
         cuCtxPushCurrent(self->cuCtx);
 
         std::cout << "=== NVDEC Sequence Callback ===" << std::endl;
@@ -89,11 +98,17 @@ private:
         std::cout << "BitDepth: " << (int) format->bit_depth_luma_minus8 + 8 << std::endl;
         std::cout << "MinNumDecodeSurfaces: " << format->min_num_decode_surfaces << std::endl;
 
+        // Если декодер уже существует, уничтожаем старый
+        if (self->cuDecoder) {
+            cuvidDestroyDecoder(self->cuDecoder);
+            self->cuDecoder = nullptr;
+        }
+
         CUVIDDECODECREATEINFO info = {};
-        info.CodecType = cudaVideoCodec_H264;
+        info.CodecType = format->codec;// Используем кодек из формата
         info.ulWidth = format->coded_width;
         info.ulHeight = format->coded_height;
-        info.ulNumDecodeSurfaces = format->min_num_decode_surfaces;
+        info.ulNumDecodeSurfaces = format->min_num_decode_surfaces + 2;// Добавляем запас
         info.ChromaFormat = format->chroma_format;
         info.OutputFormat = cudaVideoSurfaceFormat_NV12;
         info.bitDepthMinus8 = format->bit_depth_luma_minus8;
@@ -105,12 +120,14 @@ private:
 
         if (info.ulWidth == 0 || info.ulHeight == 0) {
             std::cerr << "ERROR: Width or Height is 0!" << std::endl;
+            cuCtxPopCurrent(&oldCtx);
             return 0;
         }
 
         CUresult res = cuvidCreateDecoder(&self->cuDecoder, &info);
         if (res != CUDA_SUCCESS) {
             std::cerr << "Failed to create NVDEC decoder! CUresult=" << res << std::endl;
+            cuCtxPopCurrent(&oldCtx);
             return 0;
         }
 
@@ -120,119 +137,124 @@ private:
         printf("NVDEC SEQ: codec=%d, W=%d, H=%d, chroma=%d, bdm8=%d\n",
                (int) info.CodecType, (int) info.ulWidth, (int) info.ulHeight,
                (int) info.ChromaFormat, (int) info.bitDepthMinus8);
-        return 1;
+
+        cuCtxPopCurrent(&oldCtx);
+        return info.ulNumDecodeSurfaces;// Возвращаем количество поверхностей
     }
 
     static int CUDAAPI HandlePictureDecode(void *userData, CUVIDPICPARAMS *pic) {
         NVDecoder *self = reinterpret_cast<NVDecoder *>(userData);
-        cuvidDecodePicture(self->cuDecoder, pic);
-        return 1;
+        CUcontext oldCtx = nullptr;
+        cuCtxPushCurrent(self->cuCtx);
+
+        if (!self->cuDecoder) {
+            std::cerr << "Decoder not initialized in HandlePictureDecode!" << std::endl;
+            cuCtxPopCurrent(&oldCtx);
+            return 0;
+        }
+
+        CUresult result = cuvidDecodePicture(self->cuDecoder, pic);
+        if (result != CUDA_SUCCESS) {
+            std::cerr << "Failed to decode picture: " << result << std::endl;
+        }
+
+        cuCtxPopCurrent(&oldCtx);
+        return (result == CUDA_SUCCESS) ? 1 : 0;
     }
 
-    // Display-callback: появляется NV12 — здесь делаем cuda ядро и save кадра
     static int CUDAAPI HandlePictureDisplay(void *userData, CUVIDPARSERDISPINFO *dispInfo) {
         NVDecoder *self = reinterpret_cast<NVDecoder *>(userData);
-        CUcontext old = nullptr;
+        CUcontext oldCtx = nullptr;
         cuCtxPushCurrent(self->cuCtx);
+
+        if (!self->cuDecoder) {
+            std::cerr << "Decoder not initialized in HandlePictureDisplay!" << std::endl;
+            cuCtxPopCurrent(&oldCtx);
+            return 0;
+        }
 
         CUVIDPROCPARAMS vpp = {};
         vpp.progressive_frame = dispInfo->progressive_frame;
         vpp.top_field_first = dispInfo->top_field_first;
+        vpp.second_field = 0;// Всегда первое поле
 
-#ifdef _DEBUG
-        std::cout << "[DISP] pts=" << dispInfo->timestamp
-                  << " picidx=" << dispInfo->picture_index
-                  << " prog=" << dispInfo->progressive_frame << "\n";
-#endif
-
-        // Map NVDEC output frame
-        CUdeviceptr nv12dev;
+        CUdeviceptr nv12dev = 0;
         unsigned int pitch = 0;
         CUresult mres = cuvidMapVideoFrame(self->cuDecoder, dispInfo->picture_index, &nv12dev, &pitch, &vpp);
 
-        bool use_duplicate = (mres != CUDA_SUCCESS || pitch == 0);
-        if (use_duplicate) self->dupCount++;
-        else
-            self->dupCount = 0;
-        std::vector<uint8_t> bs;
-        bool isKey = false;
+        if (mres != CUDA_SUCCESS || pitch == 0 || nv12dev == 0) {
+            std::cerr << "Failed to map video frame: " << mres << " pitch: " << pitch << std::endl;
+            cuCtxPopCurrent(&oldCtx);
+            return 0;// Возвращаем 0 при ошибке
+        }
 
-        if (!use_duplicate) {
-            // 1) NV12 -> RGB (GPU)
+        // Проверяем корректность размеров
+        if (self->width <= 0 || self->height <= 0) {
+            std::cerr << "Invalid dimensions: " << self->width << "x" << self->height << std::endl;
+            cuvidUnmapVideoFrame(self->cuDecoder, nv12dev);
+            cuCtxPopCurrent(&oldCtx);
+            return 0;
+        }
+
+        try {
+            // Выделяем память для RGB
             unsigned char *d_rgb = nullptr;
-            cudaMalloc(&d_rgb, self->width * self->height * 3);
+            cudaError_t cudaErr = cudaMalloc(&d_rgb, self->width * self->height * 3);
+            if (cudaErr != cudaSuccess || !d_rgb) {
+                throw std::runtime_error("Failed to allocate RGB memory");
+            }
+
+            // Конвертируем NV12 to RGB
             NV12ToRGB(nv12dev, self->width, self->height, pitch, d_rgb);
 
-            // 2) Prewitt (GPU)
+            // Выделяем память для выходного RGB
             unsigned char *d_rgb_out = nullptr;
-            cudaMalloc(&d_rgb_out, self->width * self->height * 3);
-            prewittColorCUDA_device(d_rgb, d_rgb_out, self->width, self->height);
-            cudaFree(d_rgb);
+            cudaErr = cudaMalloc(&d_rgb_out, self->width * self->height * 3);
+            if (cudaErr != cudaSuccess || !d_rgb_out) {
+                cudaFree(d_rgb);
+                throw std::runtime_error("Failed to allocate output RGB memory");
+            }
 
-            // 3) RGB -> NV12 (GPU, с собственным pitch_out)
+            // Применяем фильтр
+            prewittColorCUDA_device(d_rgb, d_rgb_out, self->width, self->height);
+
+
+            // Выделяем память для выходного NV12
             unsigned char *d_nv12_out = nullptr;
             size_t pitch_out = 0;
-            cudaMallocPitch(&d_nv12_out, &pitch_out, self->width, self->height * 3 / 2);
+            cudaErr = cudaMallocPitch(&d_nv12_out, &pitch_out, self->width, self->height * 3 / 2);
+            if (cudaErr != cudaSuccess || !d_nv12_out) {
+                cudaFree(d_rgb);
+                cudaFree(d_rgb_out);
+                throw std::runtime_error("Failed to allocate output NV12 memory");
+            }
+
+            // Конвертируем обратно в NV12
             RGBToNV12(d_rgb_out, self->width, self->height, d_nv12_out, (int) pitch_out);
-            cudaFree(d_rgb_out);
 
-            size_t bytes_nv12 = pitch_out * self->height + pitch_out * (self->height / 2);
-#ifdef _DEBUG
-            std::cout << "[DISP] RGB->NV12 pitch_out=" << pitch_out
-                      << " bytes=" << bytes_nv12 << "\n";
-#endif
-            // 4) Кодируем текущий кадр
+            // Кодируем и мультиплексируем
             if (self->encoder && self->muxer) {
-                bool forceIdrNow = (self->dupCount >= 2);
-                // Первый кадр — принудительный IDR (через NVENC picFlags в encodeNV12, см. ниже) или через Reconfigure forceIDR
-                self->encoder->encodeNV12((CUdeviceptr) d_nv12_out, (uint32_t) pitch_out, bs, isKey, (int) self->frameIndex, forceIdrNow);
-                // MKV mux (заголовок пишем лениво при первом keyframe внутри muxer)
-                self->muxer->write(bs.data(), (int) bs.size(), isKey, self->frameIndex++);
-                // if (self->mp4) self->mp4->write(bs.data(), (int) bs.size(), isKey, self->frameIndex++);
+                std::vector<uint8_t> encodedData;
+                bool isKeyFrame = false;
+
+                if (self->encoder->encodeNV12((CUdeviceptr) d_nv12_out, (uint32_t) pitch_out,
+                                              encodedData, isKeyFrame, 0)) {
+                    self->muxer->write(encodedData.data(), (int) encodedData.size(),
+                                       isKeyFrame, self->frameIndex++);
+                }
             }
 
-            // 5) Обновляем дупликат
-            if (self->have_dup && self->last_nv12_dup) {
-                cuMemFree(self->last_nv12_dup);
-                self->last_nv12_dup = 0;
-            }
-
-#ifdef _DEBUG
-            std::cout << "[DUP] store bytes=" << bytes_nv12
-                      << " pitch=" << pitch_out << "\n";
-#endif
-
-
-            // Храним собственную копию NV12 буфера (чтобы не зависеть от жизни surface)
-            CUdeviceptr dup;
-            cuMemAlloc(&dup, pitch_out * self->height * 3 / 2);
-            cuMemcpyDtoD(dup, (CUdeviceptr) d_nv12_out, pitch_out * self->height * 3 / 2);
-            self->last_nv12_dup = dup;
-            self->last_nv12_pitch = (uint32_t) pitch_out;
-            self->have_dup = true;
-
+            // Освобождаем ресурсы
+            cudaFree(d_rgb);
+            cudaFree(d_rgb_out);
             cudaFree(d_nv12_out);
-            cuvidUnmapVideoFrame(self->cuDecoder, nv12dev);
-
-        } else {
-            // Дубликат предыдущего кадра, чтобы не было дыр в PTS
-            if (self->have_dup && self->last_nv12_dup && self->encoder && self->muxer) {
-                size_t dup_bytes = self->last_nv12_pitch * self->height + self->last_nv12_pitch * (self->height / 2);
-#ifdef _DEBUG
-                std::cout << "[DUP] use bytes=" << dup_bytes
-                          << " pitch=" << self->last_nv12_pitch << "\n";
-#endif
-                bool forceIdrNow = (self->dupCount >= 2);
-                self->encoder->encodeNV12(self->last_nv12_dup, self->last_nv12_pitch, bs, isKey, (int) self->frameIndex, forceIdrNow);
-                self->muxer->write(bs.data(), (int) bs.size(), isKey, self->frameIndex++);
-                // if (self->mp4) self->mp4->write(bs.data(), (int) bs.size(), isKey, self->frameIndex++);
-            }
-            // Если дубликата ещё нет (самый первый кадр и сразу bad pitch) — просто пропустим
+        } catch (const std::exception &e) {
+            std::cerr << "Error in frame processing: " << e.what() << std::endl;
         }
-#ifdef _DEBUG
-        std::cout << "[DISP] map res=" << mres << " pitch=" << pitch << " w=" << self->width << " h=" << self->height << "\n";
-#endif
-        cuCtxPopCurrent(&old);// ВЫКЛ контекст
+
+        // Всегда размаппируем кадр
+        cuvidUnmapVideoFrame(self->cuDecoder, nv12dev);
+        cuCtxPopCurrent(&oldCtx);
         return 1;
     }
 };

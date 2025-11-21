@@ -135,10 +135,19 @@ int writeCodecAVPackets(std::string path) {
         if (av_bsf_init(bsf_ctx) < 0) return 7;
     }
 
+    std::cout << "Extradata size (init): " << vs->codecpar->extradata_size << "\n";
+    if (bsf_ctx)
+        std::cout << "Extradata size (after bsf): " << bsf_ctx->par_out->extradata_size << "\n";
+
+
     AVPacket *pkt = av_packet_alloc();
     int64_t count = 0;
     //NVDEC INIT
     nvdec.init((vs->codecpar->codec_id == AV_CODEC_ID_H264) ? cudaVideoCodec_H264 : cudaVideoCodec_HEVC);
+    CUcontext cur;
+    cuCtxSetCurrent(ctx);
+    cuCtxGetCurrent(&cur);
+    std::cout << "CUDA ctx active: " << (cur != nullptr) << std::endl;
 
     while (av_read_frame(ifmt, pkt) >= 0) {
         if (pkt->stream_index != vstream) {
@@ -167,6 +176,21 @@ int writeCodecAVPackets(std::string path) {
             }
         }
     }
+    if (bsf_ctx) {
+        // signal EOF to BSF
+        av_bsf_send_packet(bsf_ctx, nullptr);
+        while (true) {
+            AVPacket *op = av_packet_alloc();
+            int r = av_bsf_receive_packet(bsf_ctx, op);
+            if (r == AVERROR(EAGAIN) || r == AVERROR_EOF) {
+                av_packet_free(&op);
+                break;
+            }
+            nvdec.decodePacket(op);
+            av_packet_free(&op);
+        }
+    }
+    nvdec.decodePacket(nullptr);
 
     av_packet_free(&pkt);
     avformat_close_input(&ifmt);
@@ -183,7 +207,7 @@ int main() {
     std::cout << "output dir: " << filepath << std::endl;
     createDirectoryIfNotExists(filepath);
 
-    int rc = writeCodecAVPackets("C:/Users/user/Desktop/VideoFiltering/videos/wa.mp4");
+    int rc = writeCodecAVPackets("C:/Users/user/Desktop/VideoFiltering/videos/dr.mp4");
 
     return EXIT_SUCCESS;
 }

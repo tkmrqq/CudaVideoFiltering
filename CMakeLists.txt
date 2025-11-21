@@ -36,7 +36,15 @@ link_directories("${NVSDK_LIB_DIR}")
 message(STATUS "NVIDIA SDK lib: ${NVSDK_LIB_DIR}")
 
 # ---- Основной исполняемый файл ----
-add_executable(VideoFiltering src/main1.cpp src/prewitt_cuda.cu src/ImageProcessing.cpp src/MkvMuxer.cpp src/NVEncoder.cpp src/MP4Muxer.cpp)
+add_executable(VideoFiltering
+src/main1.cpp 
+src/util.cpp
+src/prewitt_cuda.cu
+src/ImageProcessing.cpp
+src/MkvMuxer.cpp
+src/NVEncoder.cpp
+src/MP4Muxer.cpp
+src/CuDecode.cpp)
 
 # ---- Подключаем include пути ----
 target_include_directories(VideoFiltering PRIVATE

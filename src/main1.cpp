@@ -13,22 +13,9 @@ extern "C" {
 #include <libavutil/hwcontext.h>
 }
 
+#include "CUDecode.hpp"
 #include "ImageProcessing.h"
-#include "NVDecoder.hpp"
-
-namespace fs = std::filesystem;
-
-bool createDirectoryIfNotExists(const std::string &path) {
-    try {
-        if (!fs::exists(path)) {
-            return fs::create_directories(path);
-        }
-        return true;// Directory already exists
-    } catch (const fs::filesystem_error &ex) {
-        std::cerr << "Filesystem error: " << ex.what() << std::endl;
-        return false;
-    }
-}
+#include "util.hpp"
 
 void printMetaData(AVFormatContext *fmt_ctx, int vstream) {
     if (vstream >= 0) {
@@ -109,7 +96,7 @@ int writeCodecAVPackets(std::string path) {
         return 9;
     }
     // mp4.open("C:/Users/user/Desktop/VideoFiltering/videos/out.mp4", w, h, fps);
-    NVDecoder nvdec(ctx, vs->codecpar->width, vs->codecpar->height);
+    CuDecode nvdec(ctx, vs->codecpar->width, vs->codecpar->height);
     // nvdec.attachMP4(&mp4);
     nvdec.attachEncoderMux(&encoder, &muxer);
 

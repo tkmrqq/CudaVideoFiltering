@@ -4,12 +4,12 @@
 
 namespace fs = std::filesystem;
 
-std::string chooseImage(const std::string& directory) {
+std::string chooseImage(const std::string &directory) {
     std::vector<std::string> images;
 
     std::cout << "Scan dir: " << directory << std::endl;
 
-    for (const auto& entry : fs::directory_iterator(directory)) {
+    for (const auto &entry: fs::directory_iterator(directory)) {
         if (entry.is_regular_file()) {
             std::string ext = entry.path().extension().string();
             if (ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".bmp") {
@@ -33,10 +33,22 @@ std::string chooseImage(const std::string& directory) {
         std::cout << "\nSelect image: ";
         std::cin >> choice;
 
-        if (choice >= 1 && choice <= (int)images.size()) break;
+        if (choice >= 1 && choice <= (int) images.size()) break;
         std::cout << "Incorrect. Try again!" << std::endl;
     }
 
     std::cout << "Selected: " << images[choice - 1] << "\n";
     return images[choice - 1];
+}
+
+bool createDirectoryIfNotExists(const std::string &path) {
+    try {
+        if (!fs::exists(path)) {
+            return fs::create_directories(path);
+        }
+        return true;// Directory already exists
+    } catch (const fs::filesystem_error &ex) {
+        std::cerr << "Filesystem error: " << ex.what() << std::endl;
+        return false;
+    }
 }
